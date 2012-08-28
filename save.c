@@ -1,6 +1,7 @@
 
 
 #include <stdio.h>
+#include <string.h>
 
 #include "defs.h"
 #include "cpu.h"

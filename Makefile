@@ -1,16 +1,18 @@
 
-prefix = /opt/dingoo-uclibc-toolchain/usr
+prefix = 
 exec_prefix = ${prefix}
 bindir = ${exec_prefix}/bin
 
-CC = mipsel-linux-gcc
+CC = mipsel-linux-uclibc-gcc
 LD = $(CC)
 AS = $(CC)
 INSTALL = /usr/bin/install -c
 
-CFLAGS = -DENABLE_THREADS -mips32 -msoft-float -O3 -fstrength-reduce -fthread-jumps -fexpensive-optimizations -fomit-frame-pointer -frename-registers -pipe -G 0 -D_GNU_SOURCE=1 -D_REENTRANT -DIS_LITTLE_ENDIAN -D_DEBUG -DMPU_JZ4740 -ffast-math -msoft-float
-CFLAGS += -fprofile-use
-LDFLAGS = -static $(CFLAGS) -s
+CFLAGS = -O3 -march=mips32 -mtune=r4600 -msoft-float -fomit-frame-pointer -ffast-math \
+	-falign-functions -falign-loops -falign-labels -falign-jumps -fno-builtin -fno-common \
+	-D_GNU_SOURCE=1 -DIS_LITTLE_ENDIAN
+#CFLAGS += -fprofile-use
+LDFLAGS = $(CFLAGS) -s
 ASFLAGS = $(CFLAGS)
 
 TARGETS =  sdlgnuboy
@@ -19,7 +21,7 @@ ASM_OBJS =
 
 SYS_DEFS = -DHAVE_CONFIG_H -DIS_LITTLE_ENDIAN  -DIS_LINUX
 SYS_OBJS = sys/nix/nix.o $(ASM_OBJS)
-SYS_INCS = -I/opt/dingoo-uclibc-toolchain/usr/include  -I./sys/nix
+SYS_INCS = -I./sys/nix
 
 FB_OBJS =  sys/linux/joy.o sys/oss/oss.o sys/linux/fbdev.o sys/linux/kb.o sys/linux/keymap.o
 FB_LIBS =
@@ -27,9 +29,9 @@ FB_LIBS =
 SVGA_OBJS = sys/svga/svgalib.o sys/pc/keymap.o sys/linux/joy.o sys/oss/oss.o
 SVGA_LIBS = -L/opt/dingoo-uclibc-toolchain/usr/lib -lvga
 
-SDL_OBJS = sys/sdl/sdl.o sys/sdl/keymap.o #sys/oss/oss.o
-SDL_LIBS = -L/opt/dingoo-uclibc-toolchain/usr/lib -lSDL -lpthread
-SDL_CFLAGS = -I/opt/dingoo-uclibc-toolchain/usr/include/SDL -D_GNU_SOURCE=1 -D_REENTRANT
+SDL_OBJS = sys/sdl/sdl.o sys/sdl/keymap.o sys/sdl/scaler.o #sys/oss/oss.o
+SDL_LIBS =  -lSDL
+SDL_CFLAGS = -D_GNU_SOURCE=1
 
 X11_OBJS = sys/x11/xlib.o sys/x11/keymap.o sys/linux/joy.o sys/oss/oss.o
 X11_LIBS =  -lX11 -lXext

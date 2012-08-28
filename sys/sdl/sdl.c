@@ -12,16 +12,17 @@
 #include <stdlib.h>
 #include <stdio.h>
 
+#ifndef WIN32
 #include <linux/soundcard.h>
 #include <sys/ioctl.h>
+#endif
 #include <fcntl.h>
 #include <SDL/SDL.h>
 
 #include "bigfontwhite.h"
 #include "bigfontred.h"
 #include "font.h"
-#include "loading.h"
-#include "frame.h"
+#include "scaler.h"
 
 #include "../../fb.h"
 #include "../../input.h"
@@ -46,12 +47,14 @@ static SDL_Rect overlay_rect;
 static SDL_Surface *font = NULL;
 static SDL_Surface *bigfontred = NULL;
 static SDL_Surface *bigfontwhite = NULL;
-static SDL_Surface *loadingscreen = NULL;
 static SDL_Surface *frame = NULL;
+
+SDL_mutex *sound_mutex;
+SDL_cond *sound_cv;
 
 static bool frameskip = 0;
 static bool useframeskip = 0;
-static bool showfps = 1;
+static bool showfps = 0;
 static int fps = 0;
 static int framecounter = 0;
 static long time1 = 0;
@@ -83,17 +86,12 @@ rcvar_t joy_exports[] =
 /* keymap - mappings of the form { scancode, localcode } - from sdl/keymap.c */
 extern int keymap[][2];
 
-
-
 #include "../../pcm.h"
-
 
 struct pcm pcm;
 
-#define DIVIDER 0
-
 static int sound = 1;
-static int samplerate = 44100 >> DIVIDER; //44100
+static int samplerate = 22050;
 static int stereo = 1;
 static volatile int audio_done;
 
@@ -108,22 +106,27 @@ rcvar_t pcm_exports[] =
 
 static int readvolume()
 {
+#ifndef WIN32
 	char *mixer_device = "/dev/mixer";
 	int mixer;
-    int basevolume = 50;
+	int basevolume = 50;
 	mixer = open(mixer_device, O_RDONLY);
 	if (ioctl(mixer, SOUND_MIXER_READ_VOLUME, &basevolume) == -1) {
 		fprintf(stderr, "Failed opening mixer for read - VOLUME\n");
 	}
 	close(mixer);
 	return  (basevolume>>8) & basevolume ;
+#else
+	return 0;
+#endif
 }
 
 static void setvolume(int involume)
 {
+#ifndef WIN32
 	char *mixer_device = "/dev/mixer";
 	int mixer;
-    int newvolume = involume;
+	int newvolume = involume;
 	if (newvolume > 100) newvolume = 100;
 	if (newvolume < 0) newvolume = 0;
 	int oss_volume = newvolume | (newvolume << 8); // set volume for both channels
@@ -132,11 +135,12 @@ static void setvolume(int involume)
 		fprintf(stderr, "Failed opening mixer for write - VOLUME\n");
 	}
 	close(mixer);
+#endif
 }
 
 static void audio_callback(void *blah, uint8_t  *stream, int len)
 {
-   // SDL_LockAudio();
+	SDL_LockMutex(sound_mutex);
 	int teller = 0;
 	signed short w;
 	byte * bleh = (byte *) stream;
@@ -145,12 +149,10 @@ static void audio_callback(void *blah, uint8_t  *stream, int len)
 		w =  (uint16_t)((pcm.buf[teller] - 128) << 8);
 		*bleh++ = w & 0xFF ;
 		*bleh++ = w >> 8;
-    //  from rlyeh
-    // ((signed short *)stream)[teller ] = ( pcm.buf[ teller ] ^ 0x80 ) << 8;
-
 	}
 	audio_done = 1;
-	//SDL_UnlockAudio();
+	SDL_CondSignal(sound_cv);
+	SDL_UnlockMutex(sound_mutex);
 }
 
 
@@ -164,7 +166,7 @@ void pcm_init()
 	as.freq = samplerate;
 	as.format = AUDIO_S16;
 	as.channels = 1 + stereo;
-	as.samples = (2048 >> (DIVIDER - stereo + 1));
+	as.samples = 1024;
 	as.callback = audio_callback;
 	as.userdata = 0;
 	if (SDL_OpenAudio(&as, 0) == -1)
@@ -172,11 +174,13 @@ void pcm_init()
 
 	pcm.hz = as.freq;
 	pcm.stereo = as.channels - 1;
-	//printf("%d\n",as.size);
 	pcm.len = as.size >> 1;
 	pcm.buf = malloc(pcm.len);
 	pcm.pos = 0;
 	memset(pcm.buf, 0, pcm.len);
+
+	sound_mutex = SDL_CreateMutex();
+	sound_cv = SDL_CreateCond();
 
 	SDL_PauseAudio(0);
 }
@@ -185,17 +189,19 @@ int pcm_submit()
 {
 	if (!pcm.buf) return 0;
 	if (pcm.pos < pcm.len) return 1;
-	while (!audio_done)
-		SDL_Delay(1);
+	SDL_LockMutex(sound_mutex);
+	while (!audio_done) SDL_CondWait(sound_cv, sound_mutex);
 	audio_done = 0;
 	pcm.pos = 0;
+	SDL_CondSignal(sound_cv);
+	SDL_UnlockMutex(sound_mutex);
 	return 1;
 }
 
 void pcm_close()
 {
 	if (sound)
-        SDL_CloseAudio();
+		SDL_CloseAudio();
 }
 
 /* alekmaul's scaler taken from mame4all */
@@ -210,14 +216,14 @@ void bitmap_scale(int startx, int starty, int viswidth, int visheight, int newwi
 
   do
   {
-    uint16_t *buffer_mem=&src[(y>>16)*320];
-    W=newwidth; x=startx<<16;
-    do {
-      *dst++=buffer_mem[x>>16];
-      x+=ix;
-    } while (--W);
-    dst+=pitch;
-    y+=iy;
+	uint16_t *buffer_mem=&src[(y>>16)*160];
+	W=newwidth; x=startx<<16;
+	do {
+	  *dst++=buffer_mem[x>>16];
+	  x+=ix;
+	} while (--W);
+	dst+=pitch;
+	y+=iy;
   } while (--H);
 }
 
@@ -258,8 +264,8 @@ void gfx_font_print(int16_t inX, int16_t inY, SDL_Surface* inFont, char* inStrin
 	int16_t   tempY = inY;
 	uintptr_t i, j, x, y;
 
-    SDL_LockSurface(screen);
-    SDL_LockSurface(inFont);
+	SDL_LockSurface(screen);
+	SDL_LockSurface(inFont);
 
 	for(tempChar = (uint8_t*)inString; *tempChar != '\0'; tempChar++) {
 		if(*tempChar == ' ') {
@@ -279,15 +285,15 @@ void gfx_font_print(int16_t inX, int16_t inY, SDL_Surface* inFont, char* inStrin
 			tempY += (inFont->h >> 4);
 			continue;
 		}
-		for(j = ((*tempChar >> 4) * (inFont->h >> 4)), y = tempY; (j < (((*tempChar >> 4) + 1) * (inFont->h >> 4))) && (y < 240); j++, y++) {
-			for(i = ((*tempChar & 0x0F) * (inFont->w >> 4)), x = tempX; (i < (((*tempChar & 0x0F) + 1) * (inFont->w >> 4))) && (x < 320); i++, x++) {
-				tempBuffer[(y * 320) + x] |= tempFont[(j * inFont->w) + i];
+		for(j = ((*tempChar >> 4) * (inFont->h >> 4)), y = tempY; (j < (((*tempChar >> 4) + 1) * (inFont->h >> 4))) && (y < screen->h); j++, y++) {
+			for(i = ((*tempChar & 0x0F) * (inFont->w >> 4)), x = tempX; (i < (((*tempChar & 0x0F) + 1) * (inFont->w >> 4))) && (x < screen->w); i++, x++) {
+				tempBuffer[(y * screen->w) + x] |= tempFont[(j * inFont->w) + i];
 			}
 		}
 		tempX += (inFont->w >> 4);
 	}
-    SDL_UnlockSurface(screen);
-    SDL_UnlockSurface(inFont);
+	SDL_UnlockSurface(screen);
+	SDL_UnlockSurface(inFont);
 }
 
 
@@ -297,7 +303,7 @@ void gfx_font_print_char(int16_t inX, int16_t inY, SDL_Surface* inFont, char inC
 }
 
 void gfx_font_print_center(int16_t inY, SDL_Surface* inFont, char* inString) {
-	int16_t tempX = (320 - gfx_font_width(inFont, inString)) >> 1;
+	int16_t tempX = (screen->w - gfx_font_width(inFont, inString)) >> 1;
 	gfx_font_print(tempX, inY, inFont, inString);
 }
 
@@ -413,7 +419,7 @@ SDL_Surface* gfx_tex_load_tga_from_array(uint8_t* buffer) {
 	uintptr_t i;
 	uintptr_t iNew;
 	uint8_t tempColor[3];
-    SDL_LockSurface(tempTexture);
+	SDL_LockSurface(tempTexture);
 	uint16_t* tempTexPtr = tempTexture->pixels;
 	for(i = 0; i < (tga_width * tga_height); i++) {
 		tempColor[2] = buffer[bufIndex + 0];
@@ -428,271 +434,264 @@ SDL_Surface* gfx_tex_load_tga_from_array(uint8_t* buffer) {
 
 		tempTexPtr[iNew] = SDL_MapRGB(screen->format,tempColor[0], tempColor[1], tempColor[2]);
 	}
-    SDL_UnlockSurface(tempTexture);
+	SDL_UnlockSurface(tempTexture);
 	return tempTexture;
 }
 
 void menu()
 {
-    bool pressed = false;
-    int currentselection = 1;
-    int miniscreenwidth = 140;
-    int miniscreenheight = 135;
-    SDL_Rect dstRect;
-    char *cmd = NULL;
-    SDL_Event Event;
-    SDL_Surface* miniscreen = SDL_CreateRGBSurface(SDL_SWSURFACE, miniscreenwidth, miniscreenheight, 16, screen->format->Rmask, screen->format->Gmask, screen->format->Bmask, screen->format->Amask);
-    SDL_LockSurface(miniscreen);
-    bitmap_scale(80,48,160,144,miniscreenwidth,miniscreenheight,0,(uint16_t*)fakescreen,(uint16_t*)miniscreen->pixels);
-    SDL_UnlockSurface(miniscreen);
-    char text[50];
-    SDL_PollEvent(&Event);
-    while (((currentselection != 1) && (currentselection != 8)) || (!pressed))
-    {
+	bool pressed = false;
+	int currentselection = 1;
+	int miniscreenwidth = 140;
+	int miniscreenheight = 135;
+	SDL_Rect dstRect;
+	char *cmd = NULL;
+	SDL_Event Event;
+	SDL_Surface* miniscreen = SDL_CreateRGBSurface(SDL_SWSURFACE, miniscreenwidth, miniscreenheight, 16, screen->format->Rmask, screen->format->Gmask, screen->format->Bmask, screen->format->Amask);
+	SDL_LockSurface(miniscreen);
+	bitmap_scale(0,0,160,144,miniscreenwidth,miniscreenheight,0,(uint16_t*)fakescreen,(uint16_t*)miniscreen->pixels);
+	SDL_UnlockSurface(miniscreen);
+	char text[50];
+	SDL_PollEvent(&Event);
+	while (((currentselection != 1) && (currentselection != 8)) || (!pressed))
+	{
 
-        pressed = false;
-        SDL_FillRect( screen, NULL, 0 );
+		pressed = false;
+		SDL_FillRect( screen, NULL, 0 );
 
-        dstRect.x = 320-5-miniscreenwidth;
-        dstRect.y = 30;
-        dstRect.h = miniscreenheight;
-        dstRect.w = miniscreenwidth;
-        SDL_BlitSurface(miniscreen,NULL,screen,&dstRect);
+		dstRect.x = screen->w-5-miniscreenwidth;
+		dstRect.y = 30;
+		dstRect.h = miniscreenheight;
+		dstRect.w = miniscreenwidth;
+		SDL_BlitSurface(miniscreen,NULL,screen,&dstRect);
 
-        gfx_font_print_center(5,bigfontwhite,"DINGUX GNUBOY");
+		gfx_font_print_center(5,bigfontwhite,"DINGUX GNUBOY 1.0.3");
 
-        if (currentselection == 1)
-            gfx_font_print(5,25,bigfontred,"Continue");
-        else
-            gfx_font_print(5,25,bigfontwhite,"Continue");
-
-
-        sprintf(text,"Volume %d",volume);
-
-        if (currentselection == 2)
-            gfx_font_print(5,45,bigfontred,text);
-        else
-            gfx_font_print(5,45,bigfontwhite,text);
-
-        sprintf(text,"%s",useframeskip ? "Frameskip on" : "Frameskip off");
-
-        if (currentselection == 3)
-            gfx_font_print(5,65,bigfontred,text);
-        else
-            gfx_font_print(5,65,bigfontwhite,text);
-
-        sprintf(text,"Save State %d",saveslot);
-
-        if (currentselection == 4)
-            gfx_font_print(5,85,bigfontred,text);
-        else
-            gfx_font_print(5,85,bigfontwhite,text);
-
-        sprintf(text,"Load State %d",saveslot);
-
-        if (currentselection == 5)
-            gfx_font_print(5,105,bigfontred,text);
-        else
-            gfx_font_print(5,105,bigfontwhite,text);
-
-        if (currentselection == 6)
-        {
-            if (fullscreen == 1)
-                gfx_font_print(5,125,bigfontred,"Stretched FS");
-            else
-                if (fullscreen == 2)
-                    gfx_font_print(5,125,bigfontred,"Aspect FS");
-                else
-                    gfx_font_print(5,125,bigfontred,"Native Res");
-        }
-        else
-        {
-            if (fullscreen == 1)
-                gfx_font_print(5,125,bigfontwhite,"Stretched FS");
-            else
-                if (fullscreen == 2)
-                    gfx_font_print(5,125,bigfontwhite,"Aspect FS");
-                else
-                    gfx_font_print(5,125,bigfontwhite,"Native Res");
-        }
-
-        sprintf(text,"%s",showfps ? "Show fps on" : "Show fps off");
-
-        if (currentselection == 7)
-            gfx_font_print(5,145,bigfontred,text);
-        else
-            gfx_font_print(5,145,bigfontwhite,text);
+		if (currentselection == 1)
+			gfx_font_print(5,25,bigfontred,"Continue");
+		else
+			gfx_font_print(5,25,bigfontwhite,"Continue");
 
 
-        if (currentselection == 8)
-            gfx_font_print(5,165,bigfontred,"Quit");
-        else
-            gfx_font_print(5,165,bigfontwhite,"Quit");
+		sprintf(text,"Volume %d",volume);
+
+		if (currentselection == 2)
+			gfx_font_print(5,45,bigfontred,text);
+		else
+			gfx_font_print(5,45,bigfontwhite,text);
+
+		sprintf(text,"%s",useframeskip ? "Frameskip on" : "Frameskip off");
+
+		if (currentselection == 3)
+			gfx_font_print(5,65,bigfontred,text);
+		else
+			gfx_font_print(5,65,bigfontwhite,text);
+
+		sprintf(text,"Save State %d",saveslot);
+
+		if (currentselection == 4)
+			gfx_font_print(5,85,bigfontred,text);
+		else
+			gfx_font_print(5,85,bigfontwhite,text);
+
+		sprintf(text,"Load State %d",saveslot);
+
+		if (currentselection == 5)
+			gfx_font_print(5,105,bigfontred,text);
+		else
+			gfx_font_print(5,105,bigfontwhite,text);
+
+		if (currentselection == 6)
+		{
+			if (fullscreen == 1)
+				gfx_font_print(5,125,bigfontred,"Stretched FS");
+			else
+				if (fullscreen == 2)
+					gfx_font_print(5,125,bigfontred,"Aspect FS");
+				else
+					gfx_font_print(5,125,bigfontred,"Native Res");
+		}
+		else
+		{
+			if (fullscreen == 1)
+				gfx_font_print(5,125,bigfontwhite,"Stretched FS");
+			else
+				if (fullscreen == 2)
+					gfx_font_print(5,125,bigfontwhite,"Aspect FS");
+				else
+					gfx_font_print(5,125,bigfontwhite,"Native Res");
+		}
+
+		sprintf(text,"%s",showfps ? "Show fps on" : "Show fps off");
+
+		if (currentselection == 7)
+			gfx_font_print(5,145,bigfontred,text);
+		else
+			gfx_font_print(5,145,bigfontwhite,text);
 
 
+		if (currentselection == 8)
+			gfx_font_print(5,165,bigfontred,"Quit");
+		else
+			gfx_font_print(5,165,bigfontwhite,"Quit");
+
+		gfx_font_print_center(240-50-gfx_font_height(font),font,"Dingux GnuBoy for Ritmix rzx50 and Dingoo a380");
+		gfx_font_print_center(240-40-gfx_font_height(font),font,"by exmortis@yande.ru, original port by joyrider");
+		gfx_font_print_center(240-30-gfx_font_height(font),font,"Thanks to alekmaul for the scaler and sound example,");
+		gfx_font_print_center(240-20-gfx_font_height(font),font,"Flatmush for his awesome minilib,");
+		gfx_font_print_center(240-10-gfx_font_height(font),font,"Harteex for testing and the tga loading,");
+		gfx_font_print_center(240-gfx_font_height(font),font,"Alf for the beautiful gameboy frames !");
+
+		while (SDL_PollEvent(&Event))
+		{
+			if (Event.type == SDL_KEYDOWN)
+			{
+				switch(Event.key.keysym.sym)
+				{
+					case SDLK_UP:
+						currentselection--;
+						if (currentselection == 0)
+							currentselection = 8;
+						break;
+					case SDLK_DOWN:
+						currentselection++;
+						if (currentselection == 9)
+							currentselection = 1;
+						break;
+					case SDLK_LCTRL:
+					case SDLK_LALT:
+					case SDLK_RETURN:
+						pressed = true;
+						break;
+					case SDLK_TAB:
+						if(currentselection == 2)
+						{
+							volume-=10;
+							if (volume < 0)
+								volume = 0;
+							setvolume(volume);
+						}
+						break;
+					case SDLK_BACKSPACE:
+						 if(currentselection == 2)
+						{
+							volume+=10;
+							if (volume > 100)
+								volume = 100;
+							setvolume(volume);
+						}
+						break;
+					case SDLK_LEFT:
+						switch(currentselection)
+						{
+							case 2:
+								volume--;
+								if (volume < 0)
+									volume = 0;
+								setvolume(volume);
+								break;
+							case 3:
+								useframeskip = !useframeskip;
+								break;
+							case 4:
+							case 5:
+								saveslot--;
+								if (saveslot < 1)
+									saveslot = 1;
+								cmd = malloc(strlen("set saveslot X") +1);
+								sprintf(cmd,"%s%d","set saveslot ",saveslot);
+								rc_command(cmd);
+								free(cmd);
+								break;
+							case 6:
+								fullscreen--;
+									if (fullscreen < 0)
+										fullscreen = 2;
+								break;
+							case 7:
+								showfps = !showfps;
+								break;
+
+						}
+						break;
+					case SDLK_RIGHT:
+						switch(currentselection)
+						{
+							case 2:
+								volume++;
+								if (volume >100)
+									volume = 100;
+								setvolume(volume);
+								break;
+							case 3:
+								useframeskip = !useframeskip;
+								break;
+							case 4:
+							case 5:
+								saveslot++;
+								if (saveslot > 9)
+									saveslot = 9;
+								cmd = malloc(strlen("set saveslot X") +1);
+								sprintf(cmd,"%s%d","set saveslot ",saveslot);
+								rc_command(cmd);
+								free(cmd);
+								break;
+							case 6:
+								fullscreen++;
+								if (fullscreen > 2)
+									fullscreen = 0;
+								break;
+							case 7:
+								showfps = !showfps;
+								break;
+						}
+						break;
 
 
+				}
+			}
+		}
 
+		if (pressed)
+		{
+			switch(currentselection)
+			{
+				case 3:
+					useframeskip = !useframeskip;
+					break;
+				case 7:
+					showfps = !showfps;
+					break;
+				case 6 :
+					fullscreen++;
+					if (fullscreen > 2)
+						fullscreen = 0;
+					break;
+				case 4 :
+					cmd = malloc(strlen("savestate") +1);
+					sprintf(cmd,"%s","savestate");
+					rc_command(cmd);
+					free(cmd);
+					currentselection = 1;
+					break;
+				case 5 :
+					cmd = malloc(strlen("loadstate") +1);
+					sprintf(cmd,"%s","loadstate");
+					rc_command(cmd);
+					free(cmd);
+					currentselection = 1;
+					break;
+			}
+		}
 
-
-
-
-        gfx_font_print_center(240-40-gfx_font_height(font),font,"Dingux GnuBoy has been ported by joyrider");
-        gfx_font_print_center(240-30-gfx_font_height(font),font,"Thanks to alekmaul for the scaler and sound example,");
-        gfx_font_print_center(240-20-gfx_font_height(font),font,"Flatmush for his awesome minilib,");
-        gfx_font_print_center(240-10-gfx_font_height(font),font,"Harteex for testing and the tga loading,");
-        gfx_font_print_center(240-gfx_font_height(font),font,"Alf for the beautiful gameboy frames !");
-
-        while (SDL_PollEvent(&Event))
-        {
-            if (Event.type == SDL_KEYDOWN)
-            {
-                switch(Event.key.keysym.sym)
-                {
-                    case SDLK_UP:
-                        currentselection--;
-                        if (currentselection == 0)
-                            currentselection = 8;
-                        break;
-                    case SDLK_DOWN:
-                        currentselection++;
-                        if (currentselection == 9)
-                            currentselection = 1;
-                        break;
-                    case SDLK_LCTRL:
-                    case SDLK_LALT:
-                    case SDLK_RETURN:
-                        pressed = true;
-                        break;
-                    case SDLK_TAB:
-                        if(currentselection == 2)
-                        {
-                            volume-=10;
-                            if (volume < 0)
-                                volume = 0;
-                            setvolume(volume);
-                        }
-                        break;
-                    case SDLK_BACKSPACE:
-                         if(currentselection == 2)
-                        {
-                            volume+=10;
-                            if (volume > 100)
-                                volume = 100;
-                            setvolume(volume);
-                        }
-                        break;
-                    case SDLK_LEFT:
-                        switch(currentselection)
-                        {
-                            case 2:
-                                volume--;
-                                if (volume < 0)
-                                    volume = 0;
-                                setvolume(volume);
-                                break;
-                            case 3:
-                                useframeskip = !useframeskip;
-                                break;
-                            case 4:
-                            case 5:
-                                saveslot--;
-                                if (saveslot < 1)
-                                    saveslot = 1;
-                                cmd = malloc(strlen("set saveslot X") +1);
-                                sprintf(cmd,"%s%d","set saveslot ",saveslot);
-                                rc_command(cmd);
-                                free(cmd);
-                                break;
-                            case 6:
-                                fullscreen--;
-                                    if (fullscreen < 0)
-                                        fullscreen = 2;
-                                break;
-                            case 7:
-                                showfps = !showfps;
-                                break;
-
-                        }
-                        break;
-                    case SDLK_RIGHT:
-                        switch(currentselection)
-                        {
-                            case 2:
-                                volume++;
-                                if (volume >100)
-                                    volume = 100;
-                                setvolume(volume);
-                                break;
-                            case 3:
-                                useframeskip = !useframeskip;
-                                break;
-                            case 4:
-                            case 5:
-                                saveslot++;
-                                if (saveslot > 9)
-                                    saveslot = 9;
-                                cmd = malloc(strlen("set saveslot X") +1);
-                                sprintf(cmd,"%s%d","set saveslot ",saveslot);
-                                rc_command(cmd);
-                                free(cmd);
-                                break;
-                            case 6:
-                                fullscreen++;
-                                if (fullscreen > 2)
-                                    fullscreen = 0;
-                                break;
-                            case 7:
-                                showfps = !showfps;
-                                break;
-                        }
-                        break;
-
-
-                }
-            }
-        }
-
-        if (pressed)
-        {
-            switch(currentselection)
-            {
-                case 3:
-                    useframeskip = !useframeskip;
-                    break;
-                case 7:
-                    showfps = !showfps;
-                    break;
-                case 6 :
-                    fullscreen++;
-                    if (fullscreen > 2)
-                        fullscreen = 0;
-                    break;
-                case 4 :
-                	cmd = malloc(strlen("savestate") +1);
-                    sprintf(cmd,"%s","savestate");
-                    rc_command(cmd);
-                    free(cmd);
-                    currentselection = 1;
-                    break;
-                case 5 :
-                    cmd = malloc(strlen("loadstate") +1);
-                    sprintf(cmd,"%s","loadstate");
-                    rc_command(cmd);
-                    free(cmd);
-                    currentselection = 1;
-                    break;
-            }
-        }
-
-        SDL_Flip(screen);
-        SDL_Delay(4);
-    }
-    if (currentselection == 8)
-    {
-        emuquit = true;
-    }
-    free(miniscreen);
+		SDL_Flip(screen);
+		SDL_Delay(4);
+	}
+	if (currentselection == 8)
+	{
+		emuquit = true;
+	}
+	free(miniscreen);
 }
 
 
@@ -712,90 +711,6 @@ static int mapscancode(SDLKey sym)
 	return 0;
 }
 
-
-static void joy_init()
-{
-	int i;
-	int joy_count;
-
-	/* Initilize the Joystick, and disable all later joystick code if an error occured */
-	if (!use_joy) return;
-
-	if (SDL_InitSubSystem(SDL_INIT_JOYSTICK))
-		return;
-
-	joy_count = SDL_NumJoysticks();
-
-	if (!joy_count)
-		return;
-
-	/* now try and open one. If, for some reason it fails, move on to the next one */
-	for (i = 0; i < joy_count; i++)
-	{
-		sdl_joy = SDL_JoystickOpen(i);
-		if (sdl_joy)
-		{
-			sdl_joy_num = i;
-			break;
-		}
-	}
-
-	/* make sure that Joystick event polling is a go */
-	SDL_JoystickEventState(SDL_ENABLE);
-}
-
-static void overlay_init()
-{
-	if (!use_yuv) return;
-
-	if (use_yuv < 0)
-		if (vmode[0] < 320 || vmode[1] < 288)
-			return;
-
-	overlay = SDL_CreateYUVOverlay(320, 144, SDL_YUY2_OVERLAY, screen);
-
-	if (!overlay) return;
-
-	if (!overlay->hw_overlay || overlay->planes > 1)
-	{
-		SDL_FreeYUVOverlay(overlay);
-		overlay = 0;
-		return;
-	}
-
-	SDL_LockYUVOverlay(overlay);
-
-	fb.w = 160;
-	fb.h = 144;
-	fb.pelsize = 4;
-	fb.pitch = overlay->pitches[0];
-	fb.ptr = overlay->pixels[0];
-	fb.yuv = 1;
-	fb.cc[0].r = fb.cc[1].r = fb.cc[2].r = fb.cc[3].r = 0;
-	fb.dirty = 1;
-	fb.enabled = 1;
-
-	overlay_rect.x = 0;
-	overlay_rect.y = 0;
-	overlay_rect.w = vmode[0];
-	overlay_rect.h = vmode[1];
-
-	/* Color channels are 0=Y, 1=U, 2=V, 3=Y1 */
-	switch (overlay->format)
-	{
-		/* FIXME - support more formats */
-	case SDL_YUY2_OVERLAY:
-	default:
-		fb.cc[0].l = 0;
-		fb.cc[1].l = 24;
-		fb.cc[2].l = 8;
-		fb.cc[3].l = 16;
-		break;
-	}
-
-	SDL_UnlockYUVOverlay(overlay);
-}
-
 void vid_init(char *s, char *s2)
 {
 	int flags;
@@ -803,42 +718,45 @@ void vid_init(char *s, char *s2)
 	flags = SDL_SWSURFACE;
 	if (SDL_Init(SDL_INIT_VIDEO|SDL_INIT_AUDIO))
 		die("SDL: Couldn't initialize SDL: %s\n", SDL_GetError());
-	if (!(screen = SDL_SetVideoMode(320, 240, 16, flags)))
-		die("SDL: can't set video mode: %s\n", SDL_GetError());
+
+	{
+		int vm = 0; // 0 - 320x240, 1 - 400x240, 2 - 480x272
+		int surfacewidth, surfaceheight;
+		#define NUMOFVIDEOMODES 3
+		struct { int x; int y; } VModes[NUMOFVIDEOMODES] = { {320, 240}, {400, 240}, {480, 272} };
+
+		// check 3 videomodes: 480x272, 400x240, 320x240
+		for(vm = NUMOFVIDEOMODES-1; vm >= 0; vm--) {
+			if(SDL_VideoModeOK(VModes[vm].x, VModes[vm].y, 16, flags) != 0) {
+				surfacewidth = VModes[vm].x;
+				surfaceheight = VModes[vm].y;
+				break;
+			}
+		}
+		screen = SDL_SetVideoMode(surfacewidth, surfaceheight, 16, flags);
+		if(!screen) die("SDL: can't set video mode: %s\n", SDL_GetError());
+	}
 
 	SDL_ShowCursor(0);
-//	joy_init();
 
-//	overlay_init();
+	frame = gfx_tex_load_tga(s);
 
-    loadingscreen = gfx_tex_load_tga_from_array(loading);
-    SDL_BlitSurface(loadingscreen,NULL,screen,NULL);
-    SDL_Flip(screen);
+	if (!frame)
+		frame = gfx_tex_load_tga(s2);
+	if (!frame)
+		frame = gfx_tex_load_tga("./gnuboy.tga");
 
-    frame = gfx_tex_load_tga(s);
-    if (!frame)
-        frame = gfx_tex_load_tga(s2);
-    if (!frame)
-        frame = gfx_tex_load_tga("./gnuboy.tga");
-    if (!frame)
+	font = gfx_tex_load_tga_from_array(fontarray);
+	bigfontwhite = gfx_tex_load_tga_from_array(bigfontwhitearray);
+	bigfontred = gfx_tex_load_tga_from_array(bigfontredarray);
 
-    frame = gfx_tex_load_tga_from_array(framearray);
+	fakescreen = calloc(160*144, 2);
 
-    font = gfx_tex_load_tga_from_array(fontarray);
-    bigfontwhite = gfx_tex_load_tga_from_array(bigfontwhitearray);
-    bigfontred = gfx_tex_load_tga_from_array(bigfontredarray);
-
-
-//	if (fb.yuv) return;
-
-	fakescreen = calloc(320*240, 2);
-
-
-	fb.w = 320;
-	fb.h = 240;
+	fb.w = 160;
+	fb.h = 144;
 	fb.ptr = fakescreen;
 	fb.pelsize = 2;
-	fb.pitch = 640;
+	fb.pitch = 320;
 	fb.indexed = 0;
 	fb.cc[0].r = 3;
 	fb.cc[1].r = 2;
@@ -847,14 +765,18 @@ void vid_init(char *s, char *s2)
 	fb.cc[1].l = 5;
 	fb.cc[2].l = 0;
 
-    if(fullscreen == 0)
-        SDL_BlitSurface(frame,NULL,screen,NULL);
-    else
-        if(fullscreen == 2)
-             SDL_FillRect(screen,NULL,0);
+	if(fullscreen == 0 && frame) {
+		SDL_Rect dstrect;
+		dstrect.x = (screen->w - 320) / 2;
+		dstrect.y = (screen->h - 240) / 2;
+		SDL_BlitSurface(frame,NULL,screen,&dstrect);
+	}
+	else
+		if(fullscreen == 2)
+			 SDL_FillRect(screen,NULL,0);
 
 
-    SDL_Flip(screen);
+	SDL_Flip(screen);
 
 	fb.enabled = 1;
 	fb.dirty = 0;
@@ -878,160 +800,30 @@ void ev_poll()
 		case SDL_KEYDOWN:
 			if (event.key.keysym.sym == SDLK_RETURN)
 			{
-                startpressed = true;
+				startpressed = true;
 			}
 
-            if (event.key.keysym.sym == SDLK_ESCAPE)
-            {
-                selectpressed = true;
-            }
+			if (event.key.keysym.sym == SDLK_ESCAPE)
+			{
+				selectpressed = true;
+			}
 			ev.type = EV_PRESS;
 			ev.code = mapscancode(event.key.keysym.sym);
 			ev_postevent(&ev);
 			break;
 		case SDL_KEYUP:
-            if (event.key.keysym.sym == SDLK_RETURN)
-            {
-                startpressed = false;
-            }
-            if (event.key.keysym.sym == SDLK_ESCAPE)
-            {
-                selectpressed = false;
-            }
+			if (event.key.keysym.sym == SDLK_RETURN)
+			{
+				startpressed = false;
+			}
+			if (event.key.keysym.sym == SDLK_ESCAPE)
+			{
+				selectpressed = false;
+			}
 			ev.type = EV_RELEASE;
 			ev.code = mapscancode(event.key.keysym.sym);
 			ev_postevent(&ev);
 			break;
-//		case SDL_JOYAXISMOTION:
-//			switch (event.jaxis.axis)
-//			{
-//			case 0: /* X axis */
-//				axisval = event.jaxis.value;
-//				if (axisval > joy_commit_range)
-//				{
-//					if (Xstatus==2) break;
-//
-//					if (Xstatus==0)
-//					{
-//						ev.type = EV_RELEASE;
-//						ev.code = K_JOYLEFT;
-//        			  		ev_postevent(&ev);
-//					}
-//
-//					ev.type = EV_PRESS;
-//					ev.code = K_JOYRIGHT;
-//					ev_postevent(&ev);
-//					Xstatus=2;
-//					break;
-//				}
-//
-//				if (axisval < -(joy_commit_range))
-//				{
-//					if (Xstatus==0) break;
-//
-//					if (Xstatus==2)
-//					{
-//						ev.type = EV_RELEASE;
-//						ev.code = K_JOYRIGHT;
-//        			  		ev_postevent(&ev);
-//					}
-//
-//					ev.type = EV_PRESS;
-//					ev.code = K_JOYLEFT;
-//					ev_postevent(&ev);
-//					Xstatus=0;
-//					break;
-//				}
-//
-//				/* if control reaches here, the axis is centered,
-//				 * so just send a release signal if necisary */
-//
-//				if (Xstatus==2)
-//				{
-//					ev.type = EV_RELEASE;
-//					ev.code = K_JOYRIGHT;
-//					ev_postevent(&ev);
-//				}
-//
-//				if (Xstatus==0)
-//				{
-//					ev.type = EV_RELEASE;
-//					ev.code = K_JOYLEFT;
-//					ev_postevent(&ev);
-//				}
-//				Xstatus=1;
-//				break;
-//
-//			case 1: /* Y axis*/
-//				axisval = event.jaxis.value;
-//				if (axisval > joy_commit_range)
-//				{
-//					if (Ystatus==2) break;
-//
-//					if (Ystatus==0)
-//					{
-//						ev.type = EV_RELEASE;
-//						ev.code = K_JOYUP;
-//        			  		ev_postevent(&ev);
-//					}
-//
-//					ev.type = EV_PRESS;
-//					ev.code = K_JOYDOWN;
-//					ev_postevent(&ev);
-//					Ystatus=2;
-//					break;
-//				}
-//
-//				if (axisval < -joy_commit_range)
-//				{
-//					if (Ystatus==0) break;
-//
-//					if (Ystatus==2)
-//					{
-//						ev.type = EV_RELEASE;
-//						ev.code = K_JOYDOWN;
-//        			  		ev_postevent(&ev);
-//					}
-//
-//					ev.type = EV_PRESS;
-//					ev.code = K_JOYUP;
-//					ev_postevent(&ev);
-//					Ystatus=0;
-//					break;
-//				}
-//
-//				/* if control reaches here, the axis is centered,
-//				 * so just send a release signal if necisary */
-//
-//				if (Ystatus==2)
-//				{
-//					ev.type = EV_RELEASE;
-//					ev.code = K_JOYDOWN;
-//					ev_postevent(&ev);
-//				}
-//
-//				if (Ystatus==0)
-//				{
-//					ev.type = EV_RELEASE;
-//					ev.code = K_JOYUP;
-//					ev_postevent(&ev);
-//				}
-//				Ystatus=1;
-//				break;
-//			}
-//			break;
-//		case SDL_JOYBUTTONUP:
-//			if (event.jbutton.button>15) break;
-//			ev.type = EV_RELEASE;
-//			ev.code = K_JOY0 + event.jbutton.button;
-//			ev_postevent(&ev);
-//			break;
-//		case SDL_JOYBUTTONDOWN:
-//			if (event.jbutton.button>15) break;
-//			ev.type = EV_PRESS;
-//			ev.code = K_JOY0+event.jbutton.button;
-//			ev_postevent(&ev);
-//			break;
 		case SDL_QUIT:
 			exit(1);
 			break;
@@ -1040,116 +832,112 @@ void ev_poll()
 		}
 	}
 
-    if(startpressed && selectpressed)
-    {
-        //a320_sound_thread_mute();
-        //a320_sound_paused = 1;
-        event_t ev;
-        ev.type = EV_RELEASE;
-        ev.code = mapscancode(SDLK_RETURN);
-        ev_postevent(&ev);
-        ev.type = EV_RELEASE;
-        ev.code = mapscancode(SDLK_ESCAPE);
-        ev_postevent(&ev);
-        memset(pcm.buf, 0, pcm.len);
-        menu();
-        startpressed = false;
-        selectpressed = false;
-        if(emuquit)
-            memset(pcm.buf, 0, pcm.len);
-        if(fullscreen == 0)
-            SDL_BlitSurface(frame,NULL,screen,NULL);
-        else
-            SDL_FillRect(screen, NULL, 0 );
+	if(startpressed && selectpressed)
+	{
+		event_t ev;
+		ev.type = EV_RELEASE;
+		ev.code = mapscancode(SDLK_RETURN);
+		ev_postevent(&ev);
+		ev.type = EV_RELEASE;
+		ev.code = mapscancode(SDLK_ESCAPE);
+		ev_postevent(&ev);
+		memset(pcm.buf, 0, pcm.len);
+		menu();
+		startpressed = false;
+		selectpressed = false;
+		if(emuquit)
+			memset(pcm.buf, 0, pcm.len);
+		if(fullscreen == 0 && frame) {
+			SDL_Rect dstrect;
+			SDL_FillRect(screen, NULL, 0 );
+			dstrect.x = (screen->w - 320) / 2;
+			dstrect.y = (screen->h - 240) / 2;
+			SDL_BlitSurface(frame,NULL,screen,&dstrect);
+			}
+		else
+			SDL_FillRect(screen, NULL, 0 );
 
-        SDL_Flip(screen);
+		SDL_Flip(screen);
 
-    }
+	}
 
 }
 
 void vid_setpal(int i, int r, int g, int b)
 {
-//	SDL_Color col;
-
-//	col.r = r; col.g = g; col.b = b;
-
-//	SDL_SetColors(screen, &col, i, 1);
 }
 
-void vid_preinit(char *s)
+void vid_preinit()
 {
-
-    FILE *f;
-    char *cmd;
-    int vol;
-    startvolume = readvolume();
-    datfile = strdup(s);
-    f = fopen(datfile,"rb");
-    if(f)
-    {
-        fread(&fullscreen,sizeof(int),1,f);
-        fread(&volume,sizeof(int),1,f);
-        fread(&saveslot,sizeof(int),1,f);
-        fread(&useframeskip,sizeof(bool),1,f);
-        fread(&showfps,sizeof(bool),1,f);
-        fclose(f);
-    }
-    else
-    {
-        fullscreen = 1;
-        volume = 75;
-        saveslot = 1;
-        useframeskip = false;
-    }
-    cmd = malloc(strlen("set saveslot X") +1);
-    sprintf(cmd,"%s%d","set saveslot ",saveslot);
-    rc_command(cmd);
-    free(cmd);
-    setvolume(volume);
+	static char homedir[512];
+	FILE *f;
+	char *cmd;
+	int vol;
+	startvolume = readvolume();
+	sprintf(homedir, "%s/gnuboy.cfg",sys_gethome());
+	datfile = homedir;
+	f = fopen(datfile,"rb");
+	if(f)
+	{
+		fread(&fullscreen,sizeof(int),1,f);
+		fread(&volume,sizeof(int),1,f);
+		fread(&saveslot,sizeof(int),1,f);
+		fread(&useframeskip,sizeof(bool),1,f);
+		fread(&showfps,sizeof(bool),1,f);
+		fclose(f);
+	}
+	else
+	{
+		fullscreen = 1;
+		volume = 75;
+		saveslot = 1;
+		useframeskip = false;
+	}
+	cmd = malloc(strlen("set saveslot X") +1);
+	sprintf(cmd,"%s%d","set saveslot ",saveslot);
+	rc_command(cmd);
+	free(cmd);
+	setvolume(volume);
 }
 
 void vid_close()
 {
-    setvolume(startvolume);
+	setvolume(startvolume);
 	if(fakescreen);
-        free(fakescreen);
+		free(fakescreen);
 
 	if(font)
-        SDL_FreeSurface(font);
+		SDL_FreeSurface(font);
 
-    if(bigfontred)
-        SDL_FreeSurface(bigfontred);
+	if(bigfontred)
+		SDL_FreeSurface(bigfontred);
 
-    if(bigfontwhite);
-        SDL_FreeSurface(bigfontwhite);
-
-	if(loadingscreen)
-        SDL_FreeSurface(loadingscreen);
+	if(bigfontwhite);
+		SDL_FreeSurface(bigfontwhite);
 
 	if(frame)
-        SDL_FreeSurface(frame);
+		SDL_FreeSurface(frame);
 
-    if(screen);
+	if(screen);
 	{
-        SDL_UnlockSurface(screen);
-        SDL_FreeSurface(screen);
-        SDL_Quit();
+		SDL_UnlockSurface(screen);
+		SDL_FreeSurface(screen);
+		SDL_Quit();
 
-        FILE *f;
-        printf("%s\n",datfile);
-        f = fopen(datfile,"wb");
-        if(f)
-        {
-            fwrite(&fullscreen,sizeof(int),1,f);
-            fwrite(&volume,sizeof(int),1,f);
-            fwrite(&saveslot,sizeof(int),1,f);
-            fwrite(&useframeskip,sizeof(bool),1,f);
-            fwrite(&showfps,sizeof(bool),1,f);
-            fsync(f);
-            fclose(f);
-        }
-    }
+		FILE *f;
+		printf("%s\n",datfile);
+		f = fopen(datfile,"wb");
+		if(f)
+		{
+			fwrite(&fullscreen,sizeof(int),1,f);
+			fwrite(&volume,sizeof(int),1,f);
+			fwrite(&saveslot,sizeof(int),1,f);
+			fwrite(&useframeskip,sizeof(bool),1,f);
+			fwrite(&showfps,sizeof(bool),1,f);
+			fsync(f);
+			fclose(f);
+		}
+	}
 	fb.enabled = 0;
 }
 
@@ -1161,62 +949,62 @@ void vid_settitle(char *title)
 
 void vid_begin()
 {
-    SDL_Rect dest;
-    char Text[100];
-    if (!emuquit)
-    {
-        if ((!frameskip) ||  (!useframeskip))
-        {
-            SDL_LockSurface(screen);
-            //fb.ptr = screen->pixels;
-           if (fullscreen == 1)
-                    bitmap_scale(80,48,160,144,320,240,0,(uint16_t*)fakescreen,(uint16_t*)screen->pixels);
-                else
-                    if (fullscreen == 2)
-                        bitmap_scale(80,48,160,144,267,240,53,(uint16_t*)fakescreen,(uint16_t*)screen->pixels+25);
-                    else
-                        bitmap_scale(80,48,160,144,160,144,160,(uint16_t*)fakescreen,(uint16_t*)screen->pixels+15440);
+	SDL_Rect dest;
+	char Text[100];
+	if (!emuquit)
+	{
+		if ((!frameskip) ||  (!useframeskip))
+		{
+			SDL_LockSurface(screen);
+			//fb.ptr = screen->pixels;
+			switch(fullscreen) {
+			case 1: // normal fullscreen
+				switch(screen->w) {
+					case 320: gb_upscale_320x240((uint32_t*)screen->pixels, (uint32_t*)fakescreen); break;
+					case 400: gb_upscale_400x240((uint32_t*)screen->pixels, (uint32_t*)fakescreen); break;
+					case 480: gb_upscale_480x272((uint32_t*)screen->pixels, (uint32_t*)fakescreen); break;
+				}
+				break;
+			case 2: // aspect ratio
+				switch(screen->w) {
+					case 320: bitmap_scale(0,0,160,144,267,240,screen->w-267,(uint16_t*)fakescreen,(uint16_t*)screen->pixels+(screen->h-240)/2*screen->w + (screen->w-267)/2); break;
+					case 400: gb_upscale_320x240_for_400x240((uint32_t*)screen->pixels, (uint32_t*)fakescreen); break;
+					case 480: gb_upscale_320x272_for_480x272((uint32_t*)screen->pixels, (uint32_t*)fakescreen); break;
+				}
+				break;
+			default: // native resolution
+				bitmap_scale(0,0,160,144,160,144,screen->w-160,(uint16_t*)fakescreen,(uint16_t*)screen->pixels+(screen->h-144)/2*screen->w + (screen->w-160)/2);
+				break;
+			}
 
+			if(showfps)
+			{
+				sprintf(Text,"%d",fps);
+				dest.x = 0;
+				dest.y = 0;
+				dest.w = gfx_font_width(font,Text);
+				dest.h = gfx_font_height(font);
+				SDL_FillRect(screen,&dest,0);
+				gfx_font_print(0,0,font,Text);
+				framecounter++;
+				if (SDL_GetTicks() - time1 > 1000)
+				{
+					fps=framecounter;
+					framecounter=0;
+					time1 = SDL_GetTicks();
+				}
+			}
 
-            if(showfps)
-            {
-                sprintf(Text,"%d",fps);
-                dest.x = 0;
-                dest.y = 0;
-                dest.w = gfx_font_width(font,Text);
-                dest.h = gfx_font_height(font);
-                SDL_FillRect(screen,&dest,0);
-                gfx_font_print(0,0,font,Text);
-                framecounter++;
-                if (SDL_GetTicks() - time1 > 1000)
-                {
-                    fps=framecounter;
-                    framecounter=0;
-                    time1 = SDL_GetTicks();
-                }
-            }
+			SDL_UnlockSurface(screen);
+			SDL_Flip(screen);
 
-            SDL_UnlockSurface(screen);
-            SDL_Flip(screen);
-
-        }
-        frameskip = !frameskip;
-    }
+		}
+		frameskip = !frameskip;
+	}
 }
 
 void vid_end()
 {
-//	if (overlay)
-//	{
-//		SDL_UnlockYUVOverlay(overlay);
-//		if (fb.enabled)
-//			SDL_DisplayYUVOverlay(overlay, &overlay_rect);
-//		return;
-//	}
-//	bitmap_scale(80,48,160,144,320,240,0,(uint16_t*)fakescreen,(uint16_t*)screen->pixels);
-//	SDL_UnlockSurface(screen);
-//
-//	if (fb.enabled) SDL_Flip(screen);
 }
 
 

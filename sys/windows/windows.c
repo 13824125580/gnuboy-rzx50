@@ -12,6 +12,9 @@ char *strdup();
 
 #include <SDL/SDL.h>
 
+// fake fsync for windows
+void fsync(int fd) { }
+
 void *sys_timer()
 {
 	Uint32 *tv;
@@ -47,6 +50,12 @@ void sys_sanitize(char *s)
 		if (s[i] == '\\') s[i] = '/';
 }
 
+char *sys_gethome()
+{
+	mkdir(".gnuboy");
+	return ".gnuboy";
+}
+
 void sys_initpath(char *exe)
 {
 	char *buf, *home, *p;
@@ -63,9 +72,11 @@ void sys_initpath(char *exe)
 		return;
 	}
 	buf = malloc(strlen(home) + 8);
-	sprintf(buf, ".;%s/", home);
+	sprintf(buf, "%s/.gnuboy", home);
+	mkdir(buf);
 	rc_setvar("rcpath", 1, &buf);
-	sprintf(buf, ".", home);
+	sprintf(buf, "%s/.gnuboy/saves", home);
+	mkdir(buf);
 	rc_setvar("savedir", 1, &buf);
 	free(buf);
 }

@@ -126,7 +126,7 @@ void doevents()
 
 static void shutdown()
 {
-    pcm_close();
+	pcm_close();
 	vid_close();
 }
 
@@ -183,21 +183,28 @@ static char *basefolder(char *s)
 	p = strrchr(s, '/');
 	if (p)
 	{
-	    ns = malloc(p-s+2);
-        strncpy(ns,s,(p-s+1));
-        return ns;
-    }
-	return ".";
+		ns = malloc(p-s+2);
+		memset(ns, 0, p-s+2);
+		strncpy(ns,s,(p-s+1));
+		return ns;
+	}
+	ns = malloc(2);
+	sprintf(ns, ".");
+	return ns;
 }
 
 extern void cleanup();
 
+#undef main
+
 int main(int argc, char *argv[])
 {
 	int i;
-	char *opt, *arg, *cmd, *s, *rom = 0,*var,*var2;
+	char *opt, *arg, *cmd, *s, *rom = 0, *var, *var2;
+
+	sys_sanitize(argv[0]);
+
 	/* Avoid initializing video if we don't have to */
-	putenv("HOME=/boot/local/home");
 	for (i = 1; i < argc; i++)
 	{
 		if (!strcmp(argv[i], "--help"))
@@ -219,39 +226,23 @@ int main(int argc, char *argv[])
 	}
 
 	if (!rom) usage(base(argv[0]));
-
-
-
-//    s = basefolder(rom);
-//    chdir(s);
-//    printf("%s\n",s);
-//    free(s);
-//    s = base(rom);
-//    sprintf(rom,"./%s",s);
-//    printf("%s\n",rom);
-
+	sys_sanitize(rom);
 
 	/* If we have special perms, drop them ASAP! */
-
-	var2 = basefolder(argv[0]);
-    var2 = realloc(var2,strlen(var2) + strlen("gnuboy.dat") + 1);
-    sprintf(var2,"%sgnuboy.dat",var2);
-
-	vid_preinit(var2);
-	free(var2);
+	vid_preinit();
 	init_exports();
 
-    var = malloc(strlen(rom)+5);
-    strcpy(var,rom);
-    s = strrchr(var, '.');
-    if (s) *s = 0;
-    strcat(s, ".tga");
+	// load skin specific to rom - <romname>.tga
+	var = malloc(strlen(rom)+5);
+	strcpy(var,rom);
+	s = strrchr(var, '.');
+	if (s) *s = 0;
+	strcat(s, ".tga");
 
-
-    var2 = basefolder(rom);
-    var2 = realloc(var2,strlen(var2) + strlen("gnuboy.tga") + 1);
-    sprintf(var2,"%sgnuboy.tga",var2);
-
+	// load default skin - gnuboy.tga
+	var2 = basefolder(rom);
+	var2 = realloc(var2,strlen(var2) + strlen("gnuboy.tga") + 1);
+	sprintf(var2,"%sgnuboy.tga",var2);
 
 	s = strdup(argv[0]);
 	sys_sanitize(s);
@@ -324,8 +315,8 @@ int main(int argc, char *argv[])
 	//atexit(shutdown);
 	catch_signals();
 	vid_init(var,var2);
-    free(var);
-    free(var2);
+	free(var);
+	free(var2);
 	pcm_init();
 
 
@@ -339,8 +330,8 @@ int main(int argc, char *argv[])
 	emu_run();
 
 	cleanup();
-    loader_unload();
-    shutdown();
+	loader_unload();
+	shutdown();
 
 	/* never reached */
 	return 0;
