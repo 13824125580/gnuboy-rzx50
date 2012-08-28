@@ -536,7 +536,7 @@ void menu()
 			gfx_font_print(5,165,bigfontwhite,"Quit");
 
 		gfx_font_print_center(240-50-gfx_font_height(font),font,"Dingux GnuBoy for Ritmix rzx50 and Dingoo a380");
-		gfx_font_print_center(240-40-gfx_font_height(font),font,"by exmortis@yande.ru, original port by joyrider");
+		gfx_font_print_center(240-40-gfx_font_height(font),font,"by exmortis@yandex.ru, original port by joyrider");
 		gfx_font_print_center(240-30-gfx_font_height(font),font,"Thanks to alekmaul for the scaler and sound example,");
 		gfx_font_print_center(240-20-gfx_font_height(font),font,"Flatmush for his awesome minilib,");
 		gfx_font_print_center(240-10-gfx_font_height(font),font,"Harteex for testing and the tga loading,");
@@ -874,7 +874,7 @@ void vid_preinit()
 	char *cmd;
 	int vol;
 	startvolume = readvolume();
-	sprintf(homedir, "%s/gnuboy.cfg",sys_gethome());
+	sprintf(homedir, "%s/gnuboy.cfg", sys_gethome());
 	datfile = homedir;
 	f = fopen(datfile,"rb");
 	if(f)

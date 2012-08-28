@@ -82,7 +82,7 @@ char *sys_gethome()
 	static char homedir[512];
 	char *home = getenv("HOME");
 
-	if(!home) sprintf(homedir, "%s/.gnuboy", home);
+	if(home) sprintf(homedir, "%s/.gnuboy", home);
 	mkdir(homedir, 0777);
 
 	if(errno != EROFS && errno != EACCES && errno != EPERM) return homedir;
@@ -97,7 +97,7 @@ char *sys_gethome()
 
 void sys_initpath()
 {
-	char *buf, *home = sys_gethome();
+	char *buf, *home = getenv("HOME");
 	if (!home)
 	{
 		buf = ".";
