@@ -32,7 +32,7 @@
 struct fb fb;
 
 static int use_yuv = -1;
-static int fullscreen = 1;
+static int fullscreen = 2;
 static int use_altenter = -1;
 static int use_joy = -1, sdl_joy_num;
 static SDL_Joystick * sdl_joy = NULL;
@@ -106,7 +106,7 @@ rcvar_t pcm_exports[] =
 
 static int readvolume()
 {
-#ifndef WIN32
+#if 0 //ndef WIN32
 	char *mixer_device = "/dev/mixer";
 	int mixer;
 	int basevolume = 50;
@@ -123,7 +123,7 @@ static int readvolume()
 
 static void setvolume(int involume)
 {
-#ifndef WIN32
+#if 0 //ndef WIN32
 	char *mixer_device = "/dev/mixer";
 	int mixer;
 	int newvolume = involume;
@@ -472,14 +472,14 @@ void menu()
 		else
 			gfx_font_print(5,25,bigfontwhite,"Continue");
 
-
+/*
 		sprintf(text,"Volume %d",volume);
 
 		if (currentselection == 2)
 			gfx_font_print(5,45,bigfontred,text);
 		else
 			gfx_font_print(5,45,bigfontwhite,text);
-
+*/
 		sprintf(text,"%s",useframeskip ? "Frameskip on" : "Frameskip off");
 
 		if (currentselection == 3)
@@ -550,11 +550,13 @@ void menu()
 				{
 					case SDLK_UP:
 						currentselection--;
+						if(currentselection == 2) currentselection--;
 						if (currentselection == 0)
 							currentselection = 8;
 						break;
 					case SDLK_DOWN:
 						currentselection++;
+						if(currentselection == 2) currentselection++;
 						if (currentselection == 9)
 							currentselection = 1;
 						break;
@@ -888,7 +890,7 @@ void vid_preinit()
 	}
 	else
 	{
-		fullscreen = 1;
+		fullscreen = 2;
 		volume = 75;
 		saveslot = 1;
 		useframeskip = false;
@@ -967,7 +969,7 @@ void vid_begin()
 				break;
 			case 2: // aspect ratio
 				switch(screen->w) {
-					case 320: bitmap_scale(0,0,160,144,267,240,screen->w-267,(uint16_t*)fakescreen,(uint16_t*)screen->pixels+(screen->h-240)/2*screen->w + (screen->w-267)/2); break;
+					case 320: gb_upscale_320x240((uint32_t*)screen->pixels, (uint32_t*)fakescreen); break; //bitmap_scale(0,0,160,144,267,240,screen->w-267,(uint16_t*)fakescreen,(uint16_t*)screen->pixels+(screen->h-240)/2*screen->w + (screen->w-267)/2); break;
 					case 400: gb_upscale_320x240_for_400x240((uint32_t*)screen->pixels, (uint32_t*)fakescreen); break;
 					case 480: gb_upscale_320x272_for_480x272((uint32_t*)screen->pixels, (uint32_t*)fakescreen); break;
 				}
